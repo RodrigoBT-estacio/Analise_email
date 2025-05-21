@@ -1,0 +1,186 @@
+import imaplib
+import email
+import pandas as pd
+import re
+import logging
+from datetime import datetime, timedelta
+import plotly.express as px
+
+# Dicionário que mapeia modelos de impressoras para seus respectivos modelos de toners/tintas.
+modelo_toners = {
+    'brother 3750': ['3750'],
+    'brother 5652/6702/6902/6402': ['5652', '6702', '6902', '6402'],
+    'brother 6935': ['6935'],
+    'brother 6945': ['6945'],
+    'brother 6955': ['6955'],
+    'brother 7065/7360/7460': ['7065', '7360', '7460'],
+    'brother 8085/5350': ['8085', '5350'],
+    'brother 8112/8152/8157': ['8112', '8152', '8157'],
+    'brother 8900/8360': ['8900', '8360'],
+    'canon 1127/654': ['1127', '654'],
+    'canon gx6010/4010': ['6010', '4010'],
+    'epson 3150': ['3150'],
+    'epson 5799': ['5799'],
+    'epson 6191': ['6191'],
+    'epson l365/395': ['L365', 'L395'],
+    'hp 4003/4103': ['4003', '4103'],
+    'hp 404/428/42540': ['404', '428', '42540'],
+    'hp 408/432': ['408', '432'],
+    'hp 52645/canon 1643': ['52645', '1643'],
+    'hp 72525/72535': ['72525', '72535'],
+    'hp 73140': ['73140'],
+    'hp 78330': ['78330'],
+    'hp 82560': ['82560'],
+    'hp 82660': ['82660'],
+    'kyocera 2035': ['2035'],
+    'kyocera 2040/2640': ['2040', '2640'],
+    'kyocera 2552/2553': ['2552', '2553'],
+    'kyocera 2554': ['2554'],
+    'kyocera 3040': ['3040'],
+    'kyocera 305': ['305'],
+    'kyocera 3145': ['3145'],
+    'kyocera 3550': ['3550'],
+    'kyocera 3552/3553': ['3552', '3553'],
+    'kyocera 3655/3155': ['3655', '3155'],
+    'kyocera 4012': ['4012'],
+    'kyocera 4500/4501/3501': ['4500', '4501', '3501'],
+    'kyocera 5521': ['5521'],
+    'kyocera 5526': ['5526'],
+    'kyocera 6002/5003': ['6002', '5003'],
+    'kyocera 6004': ['6004'],
+    'kyocera 6230/6635': ['6230', '6635'],
+    'kyocera 8124': ['8124'],
+    'kyocera ma5500': ['MA5500'],
+    'lexmark 2236': ['2236'],
+    'minolta c287': ['287'],
+    'minolta c300': ['C300'],
+    'samsung 3060': ['3060'],
+    'samsung 3375': ['3375'],
+    'samsung 4020/4070': ['4020', '4070'],
+    'samsung 4062': ['4062'],
+    'samsung 4080': ['4080'],
+    'samsung 4220': ['4220'],
+    'samsung 4250': ['4250'],
+    'samsung 4580': ['4580'],
+    'samsung 6555': ['6555'],
+    'samsung 7600': ['7600'],
+    'xerox 505': ['505'],
+    'xerox 7020/7030': ['7020', '7030'],
+    'xerox 7835/7855': ['7835', '7855'],
+}
+
+# Lista de prefixos de números de série a serem ignorados nos e-mails.
+prefixos_series = [
+    '088WB', '2TQ', '35C', '35P', 'AJK', 'AK', 'AMK', 'AMN', 'BHB', 'BR', 
+    'BRN', 'BSR', 'C2J', 'CMD', 'CMK', 'CNB', 'CNK', 'CNR', 'DEZ', 'JBP', 
+    'JPB', 'JPC', 'JPM', 'KND', 'KNW', 'LQA', 'LSD', 'LZE', 'LZK', 'LZN', 
+    'N42', 'NC', 'NU42', 'NW', 'Q65', 'R4P', 'R4V', 'U6', 'U612', 'U62', 
+    'U63', 'U64', 'U64198', 'U64206', 'U64210', 'U84', 'V4E', 'VR', 'VRA', 
+    'VRE', 'W8D', 'X4E', 'XN2', 'XNR', 'XPH', 'XVC', 'XVK', 'YNM', 'YNW', 
+    'ZDD', 'ZDJ', 'ZER',
+]
+
+# Função que processa o corpo do e-mail para identificar toners solicitados e respectiva quantidade.
+def processar_toners(body, modelo_toners, prefixos_series):
+    toner_encontrado = {}
+    for prefixo in prefixos_series:
+        body = re.sub(fr'{prefixo}\S*', '', body)
+    body = re.sub(r'http\S+', '', body)
+    for impressora, toners in modelo_toners.items():
+        modelo_contabilizado = False
+        for toner in toners:
+            toner_pattern = fr'({toner})'
+            matches = re.finditer(toner_pattern, body, re.IGNORECASE)
+            for match in matches:
+                if modelo_contabilizado:
+                    break
+                pos_toner = match.start()
+                quantidade_direita = buscar_numeros_proximos(body, match.end(), 'direita')
+                quantidade_esquerda = buscar_numeros_proximos(body, match.start(), 'esquerda')
+                quantidade = int(quantidade_direita or quantidade_esquerda or 1)
+                if quantidade > 0:
+                    '''print(f"Modelo da Impressora: {impressora}, Toner: {toner}, Quantidade: {quantidade}")''' # Print comentado para evitar tempo maior de processamento. Caso deseje vizualizar, remova os "'''" antes e depois do Print.
+                    toner_encontrado[impressora] = toner_encontrado.get(impressora, 0) + quantidade
+                    modelo_contabilizado = True
+    return toner_encontrado
+
+# Função auxiliar para buscar números próximos ao toner identificado.
+def buscar_numeros_proximos(body, pos, direcao='direita'):
+    texto_proximo = body[pos:pos + 100] if direcao == 'direita' else body[max(0, pos - 100):pos][::-1]
+    espacos_contados, numero_encontrado = 0, ""
+    for char in texto_proximo:
+        if char == ' ':
+            espacos_contados += 1
+        elif char.isdigit() and len(numero_encontrado) < 2:
+            numero_encontrado += char
+        else:
+            break
+        if espacos_contados > 6:
+            break
+    return numero_encontrado[::-1] if direcao == 'esquerda' else numero_encontrado if numero_encontrado.isdigit() and len(numero_encontrado) <= 2 else ""
+
+# Conexão à caixa de e-mail.
+mail = imaplib.IMAP4_SSL('servidor-imap')
+mail.login('e-mail-aqui', 'senha-aqui')
+mail.select('inbox')
+
+# Definição do período a ser filtrado os e-mails.
+periodo_filtro = (datetime.now() - timedelta(days=60)).strftime('%d-%b-%Y')
+status, email_ids = mail.search(None, f'(SINCE {periodo_filtro})')
+
+# Conjunto para armazenar e-mails já processados e lista para dados de toners.
+processed_emails, toner_data = set(), []
+
+# Lista de palavras-chave para identificar e-mails relevantes.
+palavras_interesse = ["solicita", "toner", "cartucho", "tinta", "ped", "peg", "requer", "busc", "tonner", "catruch", "buscar", "busque", "reposi", "envio", "vinda", "mandar"]
+
+# Processamento de e-mails recebidos.
+try:
+    for e_id in email_ids[0].split():
+        if e_id in processed_emails:
+            continue
+        processed_emails.add(e_id)
+        status, data = mail.fetch(e_id, '(RFC822)')
+        try:
+            raw_email = data[0][1].decode('utf-8')
+        except UnicodeDecodeError:
+            raw_email = data[0][1].decode('latin-1')
+        msg = email.message_from_string(raw_email)
+        assunto = msg['subject'] if msg['subject'] else ""
+        corpo_email = ""
+        for part in msg.walk():
+            if part.get_content_type() in ["text/plain", "text/html"]:
+                try:
+                    corpo_email = part.get_payload(decode=True).decode('utf-8')
+                except UnicodeDecodeError:
+                    corpo_email = part.get_payload(decode=True).decode('latin-1')
+        if any(re.search(fr'{palavra}', assunto.lower()) or re.search(fr'{palavra}', corpo_email.lower()) for palavra in palavras_interesse):
+            toner_encontrado = processar_toners(corpo_email, modelo_toners, prefixos_series)
+            if toner_encontrado:
+                toner_data.append(toner_encontrado)
+except Exception as e:
+    logging.error(f'Erro ao processar e-mail {e_id}: {str(e)}')
+
+# Formatação do DataFrame com os dados coletados.
+df = pd.DataFrame(toner_data)
+df.columns = [col.capitalize().replace('_', '/') for col in df.columns]
+df = df.melt(var_name="Modelo de Impressora", value_name="Qtd. Toner Solicitado")
+df = df.groupby('Modelo de Impressora', as_index=False)['Qtd. Toner Solicitado'].sum()
+df['Qtd. Toner Solicitado'] = df['Qtd. Toner Solicitado'].astype(int)
+
+# Exportação dos dados para um arquivo de texto.
+with open('Toners Solicitados.txt', 'w') as f:
+    for index, row in df.iterrows():
+        linha = f"{row['Modelo de Impressora']} - {int(row['Qtd. Toner Solicitado'])}\n"
+        f.write(linha)
+print("Arquivo 'Toners Solicitados' exportado com sucesso!")
+
+# Criação de um gráfico interativo de barras.
+fig = px.bar(df,
+             x='Modelo de Impressora',
+             y='Qtd. Toner Solicitado',
+             title='Quantidade de Toners Solicitados por Modelo de Impressora',
+             labels={'Qtd. Toner Solicitado': 'Quantidade Solicitada', 'Modelo de Impressora': 'Modelo de Impressora'},
+             text=df['Qtd. Toner Solicitado'])
+fig.update_traces(texttemplate='%{text:.0f}', textposition='outside')
+fig.show()
